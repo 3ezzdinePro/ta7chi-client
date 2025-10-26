@@ -3,7 +3,7 @@ import { io } from "socket.io-client";
 import "./styles.css";
 
 const SERVER_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
-const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
+const RANKS = ["A","J","Q","K"];
 
 /* Tiny Card component */
 function Card({ c, onClick, selected, faceUp=true }) {
