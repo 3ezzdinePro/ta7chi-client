@@ -157,6 +157,28 @@ export default function App() {
   function playerIndexById(id) {
     return players.findIndex(p => p.id === id);
   }
+  
+  // Helper: advance to next active player
+ function nextTurn(room) {
+  const len = room.players.length;
+  if(room.players.every(p => p.finished)) return; // no one left
+  let idx = room.turnIndex;
+  for(let i=0; i<len; i++) {
+    idx = (idx + 1) % len;
+    if(!room.players[idx].finished) break;
+  }
+  room.turnIndex = idx;
+}
+
+// Helper: check if only one active player remains
+function checkLastPlayer(room, roomId) {
+  const active = room.players.filter(p => !p.finished);
+  if(active.length === 1) {
+    const loser = active[0];
+    io.to(roomId).emit('game_over', { loserId: loser.id, loserName: loser.name, message: 'YOU WERE THE LEAST 7ACHWEJI' });
+    room.started = false;
+  }
+}
 
   // UI helpers: layout players around table
   function renderPlayerPanel(p, idx) {
