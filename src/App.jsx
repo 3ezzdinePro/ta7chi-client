@@ -294,7 +294,7 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <div>Prototype — Ta7chi Fih · server: {SERVER_URL}</div>
+        <div>Prototype — Ta7chi Fihe · server: {SERVER_URL}</div>
       </footer>
     </div>
   );
