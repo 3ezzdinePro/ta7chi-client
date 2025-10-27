@@ -3,9 +3,9 @@ import { io } from "socket.io-client";
 import "./styles.css";
 
 const SERVER_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
-const RANKS = ["A", "J", "Q", "K"];
+const RANKS = ["A","J","Q","K"];
 
-function Card({ c, onClick, selected, faceUp = true }) {
+function Card({ c, onClick, selected, faceUp=true }) {
   if (!c) return null;
   return (
     <div
@@ -31,12 +31,10 @@ export default function App() {
   const [socket, setSocket] = useState(null);
   const [connected, setConnected] = useState(false);
 
-  // lobby & identity
   const [roomId, setRoomId] = useState("");
   const [name, setName] = useState("Guest");
   const [myId, setMyId] = useState(null);
 
-  // game state
   const [players, setPlayers] = useState([]);
   const [pileCount, setPileCount] = useState(0);
   const [lastClaim, setLastClaim] = useState(null);
@@ -48,8 +46,7 @@ export default function App() {
   const [claimRank, setClaimRank] = useState(RANKS[0]);
   const [customClaim, setCustomClaim] = useState("");
   const [log, setLog] = useState([]);
-  const [finishedMsg, setFinishedMsg] = useState("");
-  const [loserMsg, setLoserMsg] = useState("");
+  const [alerts, setAlerts] = useState([]);
 
   const socketRef = useRef(null);
 
@@ -62,8 +59,8 @@ export default function App() {
     socketRef.current = s;
     setSocket(s);
 
-    s.on("connect", () => addLog("Connected to server"));
-    s.on("disconnect", () => addLog("Disconnected"));
+    s.on("connect", () => { setConnected(true); addLog("Connected to server"); });
+    s.on("disconnect", () => { setConnected(false); addLog("Disconnected"); });
     s.on("room_state", (st) => {
       setPlayers(st.players || []);
       setPileCount(st.pileCount || 0);
@@ -71,116 +68,160 @@ export default function App() {
       setTurnIndex(typeof st.turnIndex === "number" ? st.turnIndex : 0);
       setStarted(Boolean(st.started));
 
-      // Check if current player has finished hand
       const me = st.players.find(p => p.id === myId);
-      if (me && me.count === 0) setFinishedMsg("You finished your hand! Waiting for others...");
-      else setFinishedMsg("");
+      if (me && me.hand.length === 0 && st.started) {
+        showAlert("You finished your hand! Wait for others...");
+      }
     });
     s.on("your_hand", (h) => { setHand(h || []); setSelected([]); });
-    s.on("game_over", (data) => { if (data.loserId === myId) setLoserMsg("You lost! 😢"); else setLoserMsg(`${data.loserName} lost!`); });
+    s.on("game_over", ({ loserName, message }) => { showAlert(`${loserName} lost! ${message}`); });
+    s.on("connect_error", (err) => addLog("Connection error: " + (err.message || err)));
+    s.on("error", (e) => addLog("Socket error: " + JSON.stringify(e)));
 
     return () => s.disconnect();
   }, [myId]);
 
-  function addLog(t) {
-    setLog(l => [`${new Date().toLocaleTimeString()} — ${t}`, ...l].slice(0, 200));
-  }
+  function addLog(t) { setLog(l => [`${new Date().toLocaleTimeString()} — ${t}`, ...l].slice(0,200)); }
+  function showAlert(msg) { setAlerts(a => [...a, msg]); setTimeout(() => setAlerts(a => a.slice(1)), 4000); }
 
   function createRoom() {
-    socketRef.current?.emit("create_room", { roomId: roomId || undefined, name }, (res) => {
-      if (res?.ok) { setRoomId(res.roomId); setMyId(res.playerId); addLog(`Created room ${res.roomId}`); }
+    if (!socketRef.current) return addLog("Socket not ready");
+    socketRef.current.emit("create_room", { roomId: roomId || undefined, name }, (res) => {
+      if (res && res.ok) { setRoomId(res.roomId); setMyId(res.playerId); addLog(`Created room ${res.roomId}`); }
       else addLog("Create room failed: " + (res?.error || "unknown"));
     });
   }
-
   function joinRoom() {
+    if (!socketRef.current) return addLog("Socket not ready");
     if (!roomId) return addLog("Enter room ID to join");
-    socketRef.current?.emit("join_room", { roomId, name }, (res) => {
-      if (res?.ok) { setRoomId(res.roomId); setMyId(res.playerId); addLog(`Joined room ${res.roomId}`); }
+    socketRef.current.emit("join_room", { roomId, name }, (res) => {
+      if (res && res.ok) { setRoomId(res.roomId); setMyId(res.playerId); addLog(`Joined room ${res.roomId}`); }
       else addLog("Join failed: " + (res?.error || "unknown"));
     });
   }
+  function startGame() { if (!socketRef.current) return; socketRef.current.emit("start_game", { roomId }, (res) => { if(res && res.ok) addLog("Game started"); else addLog("Start failed: " + (res?.error || "")); }); }
 
-  function startGame() {
-    socketRef.current?.emit("start_game", { roomId }, (res) => { if (res?.ok) addLog("Game started"); else addLog("Start failed: " + (res?.error || "")); });
-  }
-
-  function toggleSelect(id) { setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]); }
-
+  function toggleSelect(cardId) { setSelected(s => s.includes(cardId) ? s.filter(x => x !== cardId) : [...s, cardId]); }
   function playSelected() {
-    if (!started || !selected.length || !myId) return;
+    if (!socketRef.current || !started || !selected.length || !myId) return;
     const claim = customClaim.trim() ? { claimText: customClaim.trim(), rank: null } : { claimText: `${selected.length} x ${claimRank}`, rank: claimRank };
     socketRef.current.emit("play_cards", { roomId, playerId: myId, cardIds: selected, claim });
     addLog(`Played ${selected.length} card(s) claiming "${claim.claimText}"`);
     setSelected([]); setCustomClaim("");
   }
 
-  function callTa7chi(claimedPlayerId) {
-    if (!lastClaim) return addLog("No claim to call");
-    socketRef.current.emit("call_bluff", { roomId, callerId: myId, claimedPlayerId }, (res) => {
-      if (res?.ok) addLog("Call result: " + JSON.stringify(res.result));
-      else addLog("Call failed: " + (res?.error || ""));
-    });
-  }
+  function callTa7chi(claimedPlayerId) { if (!socketRef.current || !lastClaim) return; socketRef.current.emit("call_bluff", { roomId, callerId: myId, claimedPlayerId }, (res) => { if(res && res.ok) addLog("Call result: "+JSON.stringify(res.result)); else addLog("Call failed: "+(res?.error||"")); }); }
 
-  function renderPlayerPanel(p, idx) {
-    const isMe = p.id === myId;
-    const isTurn = idx === turnIndex;
-    const isLastClaimant = lastClaim && lastClaim.playerId === p.id;
-    return (
-      <div key={p.id} className={`player-panel ${isTurn ? "active-turn" : ""} ${isMe ? "me" : ""}`}>
-        <div className="player-name">{p.name}{isMe ? " (you)" : ""}</div>
-        <div className="player-count">{p.count} cards</div>
-        {isLastClaimant && <div className="player-claim">Last: {lastClaim.claimText}</div>}
-        {(!isMe && isLastClaimant) && <button className="btn small danger" onClick={() => callTa7chi(p.id)}>Ta7chi!</button>}
-      </div>
-    );
-  }
+  const playerPanels = players.map((p, i) => (
+    <div key={p.id} className={`player-panel ${i===turnIndex ? "active-turn" : ""} ${p.id===myId?"me":""}`}>
+      <div className="player-name">{p.name}{p.id===myId?" (you)":""}</div>
+      <div className="player-count">{p.count} cards</div>
+      {lastClaim && lastClaim.playerId===p.id && <div className="player-claim">Last: {lastClaim.claimText}</div>}
+      {(!lastClaim || lastClaim.playerId===p.id ? null : p.id!==myId) && lastClaim && <button className="btn small danger" onClick={()=>callTa7chi(p.id)}>Ta7chi Fih!</button>}
+    </div>
+  ));
 
   return (
     <div className="app-root">
       <header className="app-header">
-        <h1>Ta7chi Fih — 3ezzdine's Edition</h1>
-        <div className={`dot ${connected ? "online" : "offline"}`}></div>
+        <div>
+          <h1>Ta7chi Fih — 3ezzdine's Edition</h1>
+          <div className="subtitle">Multiplayer Card Table</div>
+        </div>
+        <div className="status">
+          <div className={`dot ${connected?"online":"offline"}`}></div>
+          {connected?"Online":"Offline"}
+        </div>
       </header>
 
       <div className="game-container">
-        <aside className="controls-lobby">
+        <section className="controls-lobby">
           <div className="card-panel">
             <label>Room ID</label>
-            <input value={roomId} onChange={e => setRoomId(e.target.value)} placeholder="Leave empty to generate" />
+            <input value={roomId} onChange={e=>setRoomId(e.target.value)} placeholder="Leave empty to generate"/>
             <label>Name</label>
-            <input value={name} onChange={e => setName(e.target.value)} />
-            <button className="btn" onClick={createRoom}>Create Room</button>
-            <button className="btn" onClick={joinRoom}>Join Room</button>
-            <button className="btn outline" onClick={startGame} disabled={!roomId}>Start Game</button>
-            <div className="muted">{finishedMsg}</div>
-            <div className="muted">{loserMsg}</div>
-          </div>
-          <div className="log-box">
-            {log.map((l,i) => <div key={i} className="log-row">{l}</div>)}
-          </div>
-        </aside>
-
-        <main className="table-surface">
-          <div className="table-top-players">{players.slice(1,3).map(renderPlayerPanel)}</div>
-          <div className="table-center">
-            <div className="pile-stack">
-              {Array.from({length: Math.min(6, pileCount)}).map((_,i) => <Card key={i} c={{rank:'',suit:''}} faceUp={false} />)}
+            <input value={name} onChange={e=>setName(e.target.value)}/>
+            <div className="lobby-buttons">
+              <button className="btn" onClick={createRoom}>Create</button>
+              <button className="btn" onClick={joinRoom}>Join</button>
+              <button className="btn outline" onClick={startGame} disabled={!roomId}>Start</button>
             </div>
-            <div className="last-claim">{lastClaim ? lastClaim.claimText : "No claim yet"}</div>
           </div>
-          <div className="table-bottom-players">{players.slice(3).map(renderPlayerPanel)}</div>
-          <div className="hand-row">
-            {hand.map(c => <Card key={c.id} c={c} faceUp selected={selected.includes(c.id)} onClick={toggleSelect} />)}
+          <div className="card-panel">
+            <div className="muted">Players</div>
+            <div className="players-list">{playerPanels}</div>
+            <div className="muted">Pile: {pileCount}</div>
+            <div className="muted">Turn: {players[turnIndex]?.name||"-"}</div>
           </div>
-          <div className="action-buttons">
-            <button className="btn primary" onClick={playSelected} disabled={!started || players[turnIndex]?.id !== myId}>Play Selected</button>
-            <button className="btn" onClick={() => setSelected([])}>Clear</button>
-            {lastClaim && lastClaim.playerId !== myId && <button className="btn danger" onClick={() => callTa7chi(lastClaim.playerId)}>Call Ta7chi!</button>}
+        </section>
+
+        <section className="table-stage">
+          <div className="table-surface">
+            <div className="table-top-players">
+              {players.slice(1,Math.min(3,players.length)).map(p=>(
+                <div key={p.id} className="top-player">
+                  <div className="name-small">{p.name}</div>
+                  <div className="back-stack"><Card faceUp={false} c={{rank:"",suit:""}} /></div>
+                </div>
+              ))}
+            </div>
+
+            <div className="table-center">
+              <div className="pile-stack">
+                {Array.from({length: Math.min(6,pileCount)}).map((_,i)=>(
+                  <div key={i} className="pile-card" style={{transform:`translate(${i*2}px,-${i*2}px)`}}>
+                    <Card faceUp={false} c={{rank:"",suit:""}} />
+                  </div>
+                ))}
+              </div>
+              <div className="last-claim">{lastClaim?`Last: ${lastClaim.claimText}`:"No claim yet"}</div>
+            </div>
+
+            <div className="table-bottom-players">
+              {players.slice(3).map(p=>(
+                <div key={p.id} className="bottom-player">
+                  <div className="name-small">{p.name}</div>
+                  <div className="back-stack"><Card faceUp={false} c={{rank:"",suit:""}} /></div>
+                </div>
+              ))}
+            </div>
           </div>
-        </main>
+
+          <aside className="hand-and-actions">
+            <div className="hand-wrap">
+              <div className="hand-title">Your Hand ({hand.length})</div>
+              <div className="hand-row">
+                {hand.map(c=>(
+                  <Card key={c.id} c={c} selected={selected.includes(c.id)} onClick={toggleSelect} faceUp={true}/>
+                ))}
+              </div>
+            </div>
+
+            <div className="actions">
+              <div className="claim-row">
+                <label>Claim rank</label>
+                <select value={claimRank} onChange={e=>setClaimRank(e.target.value)}>{RANKS.map(r=><option key={r} value={r}>{r}</option>)}</select>
+                <div className="muted">or custom:</div>
+                <input placeholder="e.g. 2 kings" value={customClaim} onChange={e=>setCustomClaim(e.target.value)}/>
+              </div>
+              <div className="action-buttons">
+                <button className="btn primary" onClick={playSelected} disabled={!started||players[turnIndex]?.id!==myId}>Play</button>
+                <button className="btn" onClick={()=>setSelected([])}>Clear</button>
+                { lastClaim && lastClaim.playerId!==myId && <button className="btn danger" onClick={()=>callTa7chi(lastClaim.playerId)}>Call Ta7chi!</button>}
+              </div>
+            </div>
+
+            <div className="log-box">
+              <div className="muted">Activity</div>
+              <div className="log-list">{log.map((l,i)=><div key={i} className="log-row">{l}</div>)}</div>
+            </div>
+          </aside>
+        </section>
       </div>
+
+      {alerts.map((a,i)=><div key={i} className="alert-box">{a}</div>)}
+
+      <footer className="app-footer">Ta7chi Fih — Server: {SERVER_URL}</footer>
     </div>
   );
 }
