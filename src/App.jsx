@@ -3,15 +3,16 @@ import { io } from "socket.io-client";
 import "./styles.css";
 
 const SERVER_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:4000";
-const RANKS = ["A", "K", "Q", "J"];
+const RANKS = ["A", "J", "Q", "K"];
 
-/* Card component */
 function Card({ c, onClick, selected, faceUp = true }) {
   if (!c) return null;
   return (
     <div
       className={`card ${selected ? "selected" : ""} ${faceUp ? "face" : "back"}`}
-      onClick={() => onClick && onClick(c.id)}
+      onClick={(e) => { e.stopPropagation(); onClick && onClick(c.id); }}
+      role="button"
+      tabIndex={0}
     >
       {faceUp ? (
         <>
@@ -20,7 +21,7 @@ function Card({ c, onClick, selected, faceUp = true }) {
           <div className="card-bottom">{c.rank}</div>
         </>
       ) : (
-        <div className="card-back-center">🎭</div>
+        <div className="card-back-center">Ta7chi</div>
       )}
     </div>
   );
@@ -29,249 +30,157 @@ function Card({ c, onClick, selected, faceUp = true }) {
 export default function App() {
   const [socket, setSocket] = useState(null);
   const [connected, setConnected] = useState(false);
+
+  // lobby & identity
   const [roomId, setRoomId] = useState("");
   const [name, setName] = useState("Guest");
   const [myId, setMyId] = useState(null);
 
-  // Game state
+  // game state
   const [players, setPlayers] = useState([]);
   const [pileCount, setPileCount] = useState(0);
   const [lastClaim, setLastClaim] = useState(null);
   const [turnIndex, setTurnIndex] = useState(0);
   const [started, setStarted] = useState(false);
 
-  // Personal state
   const [hand, setHand] = useState([]);
   const [selected, setSelected] = useState([]);
   const [claimRank, setClaimRank] = useState(RANKS[0]);
   const [customClaim, setCustomClaim] = useState("");
   const [log, setLog] = useState([]);
+  const [finishedMsg, setFinishedMsg] = useState("");
+  const [loserMsg, setLoserMsg] = useState("");
 
-  const finishedAlertShown = useRef(false);
+  const socketRef = useRef(null);
 
-  /* ---------- SOCKET ---------- */
   useEffect(() => {
     const s = io(SERVER_URL, {
       transports: ["websocket"],
-      secure: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
     });
+    socketRef.current = s;
     setSocket(s);
 
-    s.on("connect", () => {
-      setConnected(true);
-      addLog("✅ Connected to server");
-    });
-
-    s.on("disconnect", () => {
-      setConnected(false);
-      addLog("🔌 Disconnected from server");
-    });
-
-    s.on("connect_error", (err) => {
-      addLog("❌ Connection error: " + err.message);
-    });
-
+    s.on("connect", () => addLog("Connected to server"));
+    s.on("disconnect", () => addLog("Disconnected"));
     s.on("room_state", (st) => {
       setPlayers(st.players || []);
       setPileCount(st.pileCount || 0);
       setLastClaim(st.lastClaim || null);
-      setTurnIndex(st.turnIndex ?? 0);
+      setTurnIndex(typeof st.turnIndex === "number" ? st.turnIndex : 0);
       setStarted(Boolean(st.started));
-    });
 
-    s.on("your_hand", (h) => {
-      setHand(h || []);
-      setSelected([]);
+      // Check if current player has finished hand
+      const me = st.players.find(p => p.id === myId);
+      if (me && me.count === 0) setFinishedMsg("You finished your hand! Waiting for others...");
+      else setFinishedMsg("");
     });
-
-    // 🏁 Someone lost the game
-    s.on("game_over", ({ loser, winners }) => {
-      if (loser && winners) {
-        alert(`💥 ${loser} lost the game!\n🏆 Winners: ${winners.join(", ")}`);
-        addLog(`💥 ${loser} lost — winners: ${winners.join(", ")}`);
-      }
-    });
+    s.on("your_hand", (h) => { setHand(h || []); setSelected([]); });
+    s.on("game_over", (data) => { if (data.loserId === myId) setLoserMsg("You lost! 😢"); else setLoserMsg(`${data.loserName} lost!`); });
 
     return () => s.disconnect();
-  }, []);
+  }, [myId]);
 
-  /* ---------- HELPERS ---------- */
-  function addLog(text) {
-    setLog((prev) => [`${new Date().toLocaleTimeString()} — ${text}`, ...prev].slice(0, 200));
+  function addLog(t) {
+    setLog(l => [`${new Date().toLocaleTimeString()} — ${t}`, ...l].slice(0, 200));
   }
 
-  /* ---------- UI STATE ---------- */
-  useEffect(() => {
-    if (hand.length === 0 && started && !finishedAlertShown.current) {
-      finishedAlertShown.current = true;
-      alert("🎉 You’ve finished all your cards! Wait for the others to finish.");
-      addLog("🎉 You finished all your cards!");
-    }
-  }, [hand, started]);
-
-  /* ---------- ACTIONS ---------- */
-  const createRoom = () => {
-    if (!socket) return;
-    socket.emit("create_room", { name }, (res) => {
-      if (res?.ok) {
-        setRoomId(res.roomId);
-        setMyId(res.playerId);
-        addLog(`Room created: ${res.roomId}`);
-      } else addLog("❌ Failed to create room");
+  function createRoom() {
+    socketRef.current?.emit("create_room", { roomId: roomId || undefined, name }, (res) => {
+      if (res?.ok) { setRoomId(res.roomId); setMyId(res.playerId); addLog(`Created room ${res.roomId}`); }
+      else addLog("Create room failed: " + (res?.error || "unknown"));
     });
-  };
+  }
 
-  const joinRoom = () => {
-    if (!socket) return;
+  function joinRoom() {
     if (!roomId) return addLog("Enter room ID to join");
-    socket.emit("join_room", { roomId, name }, (res) => {
-      if (res?.ok) {
-        setRoomId(res.roomId);
-        setMyId(res.playerId);
-        addLog(`Joined room ${res.roomId}`);
-      } else addLog("❌ Failed to join room");
+    socketRef.current?.emit("join_room", { roomId, name }, (res) => {
+      if (res?.ok) { setRoomId(res.roomId); setMyId(res.playerId); addLog(`Joined room ${res.roomId}`); }
+      else addLog("Join failed: " + (res?.error || "unknown"));
     });
-  };
+  }
 
-  const startGame = () => {
-    if (!socket || !roomId) return;
-    socket.emit("start_game", { roomId });
-  };
+  function startGame() {
+    socketRef.current?.emit("start_game", { roomId }, (res) => { if (res?.ok) addLog("Game started"); else addLog("Start failed: " + (res?.error || "")); });
+  }
 
-  const toggleSelect = (id) =>
-    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  function toggleSelect(id) { setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]); }
 
-  const playSelected = () => {
-    if (!socket || !roomId) return;
-    if (!selected.length) return addLog("Select at least one card");
+  function playSelected() {
+    if (!started || !selected.length || !myId) return;
+    const claim = customClaim.trim() ? { claimText: customClaim.trim(), rank: null } : { claimText: `${selected.length} x ${claimRank}`, rank: claimRank };
+    socketRef.current.emit("play_cards", { roomId, playerId: myId, cardIds: selected, claim });
+    addLog(`Played ${selected.length} card(s) claiming "${claim.claimText}"`);
+    setSelected([]); setCustomClaim("");
+  }
 
-    const claim = customClaim.trim()
-      ? { claimText: customClaim.trim(), rank: null }
-      : { claimText: `${selected.length} x ${claimRank}`, rank: claimRank };
+  function callTa7chi(claimedPlayerId) {
+    if (!lastClaim) return addLog("No claim to call");
+    socketRef.current.emit("call_bluff", { roomId, callerId: myId, claimedPlayerId }, (res) => {
+      if (res?.ok) addLog("Call result: " + JSON.stringify(res.result));
+      else addLog("Call failed: " + (res?.error || ""));
+    });
+  }
 
-    socket.emit("play_cards", { roomId, playerId: myId, cardIds: selected, claim });
-    setSelected([]);
-    setCustomClaim("");
-    addLog(`🎴 Played ${selected.length} card(s) claiming "${claim.claimText}"`);
-  };
-
-  const callTa7chi = (claimedPlayerId) => {
-    if (!socket || !roomId) return;
-    socket.emit("call_bluff", { roomId, callerId: myId, claimedPlayerId });
-    addLog("🔥 You called Ta7chi Fih!");
-  };
-
-  /* ---------- UI RENDER ---------- */
-  const renderPlayer = (p, idx) => {
+  function renderPlayerPanel(p, idx) {
     const isMe = p.id === myId;
     const isTurn = idx === turnIndex;
     const isLastClaimant = lastClaim && lastClaim.playerId === p.id;
     return (
-      <div
-        key={p.id}
-        className={`player-card ${isTurn ? "turn" : ""} ${isMe ? "me" : ""}`}
-      >
-        <div className="name">{p.name}{isMe ? " (You)" : ""}</div>
-        <div className="count">{p.count} cards</div>
-        {isLastClaimant && <div className="last-claim">💬 {lastClaim.claimText}</div>}
-        {lastClaim && lastClaim.playerId === p.id && !isMe && (
-          <button className="btn danger small" onClick={() => callTa7chi(p.id)}>
-            Ta7chi Fih!
-          </button>
-        )}
+      <div key={p.id} className={`player-panel ${isTurn ? "active-turn" : ""} ${isMe ? "me" : ""}`}>
+        <div className="player-name">{p.name}{isMe ? " (you)" : ""}</div>
+        <div className="player-count">{p.count} cards</div>
+        {isLastClaimant && <div className="player-claim">Last: {lastClaim.claimText}</div>}
+        {(!isMe && isLastClaimant) && <button className="btn small danger" onClick={() => callTa7chi(p.id)}>Ta7chi!</button>}
       </div>
     );
-  };
+  }
 
   return (
-    <div className="app">
-      <header>
-        <h1>Ta7chi Fih: 3ezzdine’s Edition</h1>
-        <div className={`status ${connected ? "on" : "off"}`}>
-          {connected ? "🟢 Connected" : "🔴 Offline"}
-        </div>
+    <div className="app-root">
+      <header className="app-header">
+        <h1>Ta7chi Fih — 3ezzdine's Edition</h1>
+        <div className={`dot ${connected ? "online" : "offline"}`}></div>
       </header>
 
-      <main>
-        {/* Lobby controls */}
-        <section className="lobby">
-          <input
-            value={roomId}
-            onChange={(e) => setRoomId(e.target.value)}
-            placeholder="Room ID"
-          />
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Player name"
-          />
-          <div className="btn-row">
-            <button onClick={createRoom}>Create Room</button>
-            <button onClick={joinRoom}>Join Room</button>
-            <button onClick={startGame}>Start Game</button>
+      <div className="game-container">
+        <aside className="controls-lobby">
+          <div className="card-panel">
+            <label>Room ID</label>
+            <input value={roomId} onChange={e => setRoomId(e.target.value)} placeholder="Leave empty to generate" />
+            <label>Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} />
+            <button className="btn" onClick={createRoom}>Create Room</button>
+            <button className="btn" onClick={joinRoom}>Join Room</button>
+            <button className="btn outline" onClick={startGame} disabled={!roomId}>Start Game</button>
+            <div className="muted">{finishedMsg}</div>
+            <div className="muted">{loserMsg}</div>
           </div>
-        </section>
-
-        {/* Game Table */}
-        <section className="table">
-          <div className="players">{players.map(renderPlayer)}</div>
-
-          <div className="pile">
-            <div className="pile-count">Pile: {pileCount}</div>
-            <div className="last">{lastClaim ? `Last: ${lastClaim.claimText}` : "No claim yet"}</div>
-          </div>
-
-          <div className="hand-section">
-            <div className="hand-title">Your Hand ({hand.length})</div>
-            <div className="hand">
-              {hand.map((c) => (
-                <Card
-                  key={c.id}
-                  c={c}
-                  onClick={toggleSelect}
-                  selected={selected.includes(c.id)}
-                />
-              ))}
-            </div>
-
-            <div className="actions">
-              <select value={claimRank} onChange={(e) => setClaimRank(e.target.value)}>
-                {RANKS.map((r) => (
-                  <option key={r}>{r}</option>
-                ))}
-              </select>
-              <input
-                placeholder="Custom claim (e.g. 2 Kings)"
-                value={customClaim}
-                onChange={(e) => setCustomClaim(e.target.value)}
-              />
-              <button onClick={playSelected} className="btn primary">Play</button>
-              <button onClick={() => setSelected([])}>Clear</button>
-              {lastClaim && lastClaim.playerId !== myId && (
-                <button className="btn danger" onClick={() => callTa7chi(lastClaim.playerId)}>
-                  Ta7chi!
-                </button>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* Log */}
-        <section className="log">
-          <h3>Activity Log</h3>
           <div className="log-box">
-            {log.map((l, i) => (
-              <div key={i}>{l}</div>
-            ))}
+            {log.map((l,i) => <div key={i} className="log-row">{l}</div>)}
           </div>
-        </section>
-      </main>
+        </aside>
 
-      <footer>
-        <small>Server: {SERVER_URL}</small>
-      </footer>
+        <main className="table-surface">
+          <div className="table-top-players">{players.slice(1,3).map(renderPlayerPanel)}</div>
+          <div className="table-center">
+            <div className="pile-stack">
+              {Array.from({length: Math.min(6, pileCount)}).map((_,i) => <Card key={i} c={{rank:'',suit:''}} faceUp={false} />)}
+            </div>
+            <div className="last-claim">{lastClaim ? lastClaim.claimText : "No claim yet"}</div>
+          </div>
+          <div className="table-bottom-players">{players.slice(3).map(renderPlayerPanel)}</div>
+          <div className="hand-row">
+            {hand.map(c => <Card key={c.id} c={c} faceUp selected={selected.includes(c.id)} onClick={toggleSelect} />)}
+          </div>
+          <div className="action-buttons">
+            <button className="btn primary" onClick={playSelected} disabled={!started || players[turnIndex]?.id !== myId}>Play Selected</button>
+            <button className="btn" onClick={() => setSelected([])}>Clear</button>
+            {lastClaim && lastClaim.playerId !== myId && <button className="btn danger" onClick={() => callTa7chi(lastClaim.playerId)}>Call Ta7chi!</button>}
+          </div>
+        </main>
+      </div>
     </div>
   );
 }
