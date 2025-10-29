@@ -62,17 +62,19 @@ export default function App() {
     s.on("connect", () => { setConnected(true); addLog("Connected to server"); });
     s.on("disconnect", () => { setConnected(false); addLog("Disconnected"); });
     s.on("room_state", (st) => {
-      setPlayers(st.players || []);
-      setPileCount(st.pileCount || 0);
-      setLastClaim(st.lastClaim || null);
-      setTurnIndex(typeof st.turnIndex === "number" ? st.turnIndex : 0);
-      setStarted(Boolean(st.started));
+    setPlayers(st.players || []);
+    setPileCount(st.pileCount || 0);
+    setLastClaim(st.lastClaim || null);
+    setTurnIndex(typeof st.turnIndex === "number" ? st.turnIndex : 0);
+    setStarted(Boolean(st.started));
 
-      const me = st.players.find(p => p.id === myId);
-      if (me && me.hand.length === 0 && st.started) {
-        showAlert("You finished your hand! Wait for others...");
-      }
-    });
+  // Only show alert if the game is running and we already received our hand
+    const me = st.players.find((p) => p.id === myId);
+    if (st.started && me && me.hand.length === 0 && hand.length > 0) {
+    showAlert("You finished your hand! Wait for others...");
+  }
+});
+
     s.on("your_hand", (h) => { setHand(h || []); setSelected([]); });
     s.on("game_over", ({ loserName, message }) => { showAlert(`${loserName} lost! ${message}`); });
     s.on("connect_error", (err) => addLog("Connection error: " + (err.message || err)));
